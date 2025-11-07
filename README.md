@@ -4,21 +4,21 @@ Opinionated helper scripts and docs for running modular Docker/Docker Compose pr
 
 ## Quickstart
 1. Install dependencies (Python 3.10+, PyYAML, Salt, Docker Compose v2).
-2. Run the CLI from repo root with `./scripts/saltdocker list` (or add `scripts/` to your `PATH`).
+2. Run the CLI from repo root with `./scripts/saltdocker list`（建议立即执行 `sudo salt-call --local state.apply tooling.saltdocker_cli pillar='{"saltdocker":{"root":"$(pwd)"}}'`，自动把 `/usr/local/bin/saltdocker` 指向当前仓库，后续可直接运行 `saltdocker ...`）。
 3. Copy env templates from `config/env/*.env` and fill in secrets (or render via Salt pillars).
 4. Deploy a stack: `./scripts/saltdocker deploy api --env staging --pillar domain=staging.example.com`.
 5. Tail logs or check status with `./scripts/saltdocker logs api --follow` and `./scripts/saltdocker status api`.
 6. Run `./scripts/saltdocker health api` after deployments to ensure containers are healthy.
 7. Audit metadata anytime via `./scripts/saltdocker validate` (or `./scripts/saltdocker menu` for a cheat sheet).
 8. 完成需求后执行 `./scripts/check.sh`，自动跑 lint/validate/compose config，确保代码随时可合并。
-9. 需要提交+推送时用 `./scripts/git-release.sh "feat: xxx"`：它会调用 `scripts/check.sh`、`git add -A`、根据 commit message 推断 tag bump（`feat` → 次版本、`breaking!` → 主版本、其他 → 补丁）并 `git push`。可用 `BUMP=minor ./scripts/git-release.sh` 强制级别，或用 `DRY_RUN=1` 仅预览。
+9. 需要提交+推送时用 `saltdocker git push "feat: xxx"`（等同 `./scripts/git-release.sh`）：它会调用 `scripts/check.sh`、`git add -A`、根据 commit message 推断 tag bump（`feat` → 次版本、`breaking!` → 主版本、其他 → 补丁）并 `git push`。可用 `--bump minor` 或 `BUMP=minor` 强制级别，或用 `--dry-run` / `DRY_RUN=1` 仅预览。
 10. 创建 sudo 用户示例：`sudo ./scripts/saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub`（默认写入免密码 sudo，如需密码可加 `--require-password`）。
 
 ## CLI Usage
 - Local invocation: `./scripts/saltdocker <command>` works anywhere because the script uses absolute paths under `/root/saltdocker`.
-- Install globally: `./scripts/saltdocker install-cli --destination /usr/local/bin/saltdocker` (or add `scripts/` to your `PATH`). Use `--copy` if symlinks are restricted and `--force` to overwrite an existing binary.
+- Install globally: `sudo salt-call --local state.apply tooling.saltdocker_cli pillar='{"saltdocker":{"root":"/opt/saltdocker"}}'`（或直接运行 `./scripts/saltdocker install-cli --destination /usr/local/bin/saltdocker --copy --force`）。
 - Menu/help: `./scripts/saltdocker --help` now prints a quick-reference table; `./scripts/saltdocker menu` renders the same table plus the registered project list.
-- Provision sudo users: `./scripts/saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub --force` (must run as root; add `--passwordless-sudo` to drop a `/etc/sudoers.d/` entry, `--sudoers-dir` to override the drop-in path).
+- Provision sudo users: `./scripts/saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub --force`（默认写入 `/etc/sudoers.d` 提升为免密码 sudo，如需保留密码提示可加 `--require-password`；`--sudoers-dir` 可覆盖 drop-in 目录）。
 - Manage fleet installs via Salt: include the `tooling.saltdocker_cli` state and set pillar `saltdocker:root: /opt/saltdocker` (or whichever clone path) to keep `/usr/local/bin/saltdocker` pointing at the repo automatically.
 - Need completions or shell aliases? Add `alias saltdocker=./scripts/saltdocker` to your shell profile or export `PATH=$PATH:/root/saltdocker/scripts`.
 

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -973,6 +974,29 @@ def cmd_menu(_: argparse.Namespace, projects: Dict[str, dict]) -> None:
             print(f"  - {name}")
 
 
+def cmd_git(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    _ = projects
+    if args.git_command == "push":
+        _git_push(args)
+    else:
+        raise SaltDockerError("Specify a git subcommand (e.g., 'saltdocker git push')")
+
+
+def _git_push(args: argparse.Namespace) -> None:
+    script = ROOT / "scripts" / "git-release.sh"
+    if not script.exists():
+        raise SaltDockerError(f"git-release script not found at {script}")
+    env = os.environ.copy()
+    if args.bump:
+        env["BUMP"] = args.bump
+    if args.skip_checks:
+        env["SKIP_CHECKS"] = "1"
+    if args.dry_run:
+        env["DRY_RUN"] = "1"
+    message = args.message or f"chore: auto release {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    run_cmd_env([script.as_posix(), message], False, env)
+
+
 COMMANDS = {
     "list": cmd_list,
     "describe": cmd_describe,
@@ -989,6 +1013,7 @@ COMMANDS = {
     "bump-image-bulk": cmd_bump_bulk,
     "add-sudo-user": cmd_add_sudo_user,
     "install-cli": cmd_install_cli,
+    "git": cmd_git,
     "menu": cmd_menu,
 }
 
@@ -1323,6 +1348,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Overwrite if destination exists",
+    )
+
+    git_parser = subparsers.add_parser("git", help="Git automation helpers")
+    git_sub = git_parser.add_subparsers(dest="git_command")
+    git_push = git_sub.add_parser("push", help="Run release pipeline (git-release.sh)")
+    git_push.add_argument(
+        "message",
+        nargs="?",
+        help="Commit message (defaults to chore auto release with UTC timestamp)",
+    )
+    git_push.add_argument(
+        "--bump",
+        choices=["major", "minor", "patch"],
+        help="Override semantic version bump",
+    )
+    git_push.add_argument(
+        "--skip-checks",
+        action="store_true",
+        help="Skip running scripts/check.sh",
+    )
+    git_push.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without committing/tagging.",
     )
 
     subparsers.add_parser("menu", help="Show the curated menu")
