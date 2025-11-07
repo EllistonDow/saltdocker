@@ -12,6 +12,7 @@ Opinionated helper scripts and docs for running modular Docker/Docker Compose pr
 7. Audit metadata anytime via `./scripts/saltdocker validate` (or `./scripts/saltdocker menu` for a cheat sheet).
 8. 完成需求后执行 `./scripts/check.sh`，自动跑 lint/validate/compose config，确保代码随时可合并。
 9. 需要提交+推送时用 `./scripts/git-release.sh "feat: xxx"`：它会调用 `scripts/check.sh`、`git add -A`、根据 commit message 推断 tag bump（`feat` → 次版本、`breaking!` → 主版本、其他 → 补丁）并 `git push`。可用 `BUMP=minor ./scripts/git-release.sh` 强制级别，或用 `DRY_RUN=1` 仅预览。
+10. 创建 sudo 用户示例：`sudo ./scripts/saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub`（默认写入免密码 sudo，如需密码可加 `--require-password`）。
 
 ## CLI Usage
 - Local invocation: `./scripts/saltdocker <command>` works anywhere because the script uses absolute paths under `/root/saltdocker`.

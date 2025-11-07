@@ -1288,8 +1288,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_user.add_argument(
         "--passwordless-sudo",
+        dest="passwordless_sudo",
         action="store_true",
-        help="Create/update a sudoers drop-in for passwordless sudo",
+        default=True,
+        help="Create/update a sudoers drop-in for passwordless sudo (default)",
+    )
+    add_user.add_argument(
+        "--require-password",
+        dest="passwordless_sudo",
+        action="store_false",
+        help="Skip passwordless sudo drop-in (use sudo password)",
     )
     add_user.add_argument(
         "--sudoers-dir",

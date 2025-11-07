@@ -14,6 +14,6 @@
 | `health <project>` | Assert containers healthy | `saltdocker health api` |
 | `validate` | Verify compose/state/doc triplets | `saltdocker validate` |
 | `menu` | Render the built-in cheat sheet | `saltdocker menu` |
-| `add-sudo-user <name>` | Create/ensure sudo-enabled local user (root only) | `sudo saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub --passwordless-sudo` |
+| `add-sudo-user <name>` | Create/ensure sudo-enabled local user (root only；默认免密码 sudo) | `sudo saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub` |
 
 See `saltdocker --help` for the full command table with descriptions and examples.
