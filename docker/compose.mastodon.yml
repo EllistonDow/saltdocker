@@ -1,0 +1,49 @@
+version: '3.9'
+services:
+  mastodon-web:
+    image: ghcr.io/mastodon/mastodon:latest
+    command: bundle exec rails s -p 3000
+    env_file:
+      - config/env/mastodon.env
+    depends_on:
+      - mastodon-db
+      - mastodon-redis
+    ports:
+      - "3000:3000"
+    volumes:
+      - mastodon_uploads:/mastodon/public/system
+    restart: unless-stopped
+  mastodon-streaming:
+    image: ghcr.io/mastodon/mastodon:latest
+    command: npm run start
+    env_file:
+      - config/env/mastodon.env
+    depends_on:
+      - mastodon-db
+      - mastodon-redis
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
+  mastodon-sidekiq:
+    image: ghcr.io/mastodon/mastodon:latest
+    command: bundle exec sidekiq
+    env_file:
+      - config/env/mastodon.env
+    depends_on:
+      - mastodon-db
+      - mastodon-redis
+    restart: unless-stopped
+  mastodon-db:
+    image: postgres:15
+    env_file:
+      - config/env/mastodon.env
+    volumes:
+      - mastodon_db:/var/lib/postgresql/data
+    restart: unless-stopped
+  mastodon-redis:
+    image: redis:7
+    command: redis-server --save "" --appendonly no
+    restart: unless-stopped
+volumes:
+  mastodon_db:
+  mastodon_uploads:

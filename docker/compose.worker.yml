@@ -1,0 +1,11 @@
+version: '3.9'
+services:
+  worker:
+    image: ghcr.io/example/worker:latest
+    restart: unless-stopped
+    environment:
+      APP_ENV: dev
+      QUEUE_URL: redis://redis:6379/0
+  redis:
+    image: redis:7
+    restart: unless-stopped

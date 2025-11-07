@@ -1,0 +1,78 @@
+http:
+  routers:
+    mattermost:
+      rule: Host(`mm.local.salt`)
+      service: mattermost
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+    community:
+      rule: Host(`community.local.salt`)
+      service: community
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+    docs:
+      rule: Host(`docs.local.salt`)
+      service: docs
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+    mastodon:
+      rule: Host(`mastodon.local.salt`)
+      service: mastodon
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+    shop:
+      rule: Host(`shop.local.salt`)
+      service: saleor
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+    medusa:
+      rule: Host(`medusa.local.salt`)
+      service: medusajs
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+    status:
+      rule: Host(`status.local.salt`)
+      service: uptime
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+  services:
+    mattermost:
+      loadBalancer:
+        servers:
+          - url: http://mattermost:8065
+    community:
+      loadBalancer:
+        servers:
+          - url: http://discourse:8080
+    docs:
+      loadBalancer:
+        servers:
+          - url: http://docusaurus-web:80
+    mastodon:
+      loadBalancer:
+        servers:
+          - url: http://mastodon-web:3000
+    saleor:
+      loadBalancer:
+        servers:
+          - url: http://saleor:8000
+    medusajs:
+      loadBalancer:
+        servers:
+          - url: http://medusajs:9000
+    uptime:
+      loadBalancer:
+        servers:
+          - url: http://uptime:3001
+
+tls:
+  certificates:
+    - certFile: /etc/traefik/certs/dev.crt
+      keyFile: /etc/traefik/certs/dev.key

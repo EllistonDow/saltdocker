@@ -1,0 +1,243 @@
+projects:
+  api:
+    compose_file: docker/compose.api.yml
+    description: Public REST gateway with Traefik exposure
+    envs:
+      available:
+      - dev
+      - staging
+      - prod
+      default: dev
+    salt_states:
+    - docker.api
+    - traefik.api
+    services:
+      api:
+        default_scale: 2
+        max_scale: 6
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: api.local.salt
+      middlewares:
+      - compress@
+  discourse:
+    compose_file: docker/compose.discourse.yml
+    description: Discourse Community
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.discourse
+    services:
+      discourse:
+        default_scale: 1
+        max_scale: 3
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: community.local.salt
+  docusaurus:
+    compose_file: docker/compose.docusaurus.yml
+    description: Docusaurus Docs
+    envs:
+      available:
+      - dev
+      - prod
+      default: dev
+    salt_states:
+    - docker.docusaurus
+    services:
+      docusaurus:
+        default_scale: 1
+        max_scale: 4
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: docs.local.salt
+  gateway:
+    compose_file: docker/compose.gateway.yml
+    description: Edge Traefik + support services
+    envs:
+      available:
+      - staging
+      - prod
+      default: prod
+    salt_states:
+    - traefik.gateway
+    - observability.gateway
+    services:
+      traefik:
+        default_scale: 1
+        max_scale: 2
+        min_scale: 1
+  mastodon:
+    compose_file: docker/compose.mastodon.yml
+    description: Mastodon Social
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.mastodon
+    services:
+      mastodon:
+        default_scale: 1
+        max_scale: 3
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: mastodon.local.salt
+  mattermost:
+    compose_file: docker/compose.mattermost.yml
+    description: Mattermost Team Edition
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.mattermost
+    services:
+      mattermost:
+        default_scale: 1
+        max_scale: 3
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: mm.local.salt
+  medusajs:
+    compose_file: docker/compose.medusajs.yml
+    description: MedusaJS Commerce
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.medusajs
+    services:
+      medusajs:
+        default_scale: 1
+        max_scale: 4
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: medusa.local.salt
+  payments:
+    compose_file: docker/compose.payments.yml
+    description: Payments API
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.payments
+    services:
+      payments:
+        default_scale: 2
+        max_scale: 5
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: pay.local.salt
+  plausible:
+    compose_file: docker/compose.plausible.yml
+    description: Plausible Analytics
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.plausible
+    services:
+      plausible:
+        default_scale: 1
+        max_scale: 3
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: plausible.local.salt
+  saleor:
+    compose_file: docker/compose.saleor.yml
+    description: Saleor Commerce
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.saleor
+    services:
+      saleor:
+        default_scale: 2
+        max_scale: 5
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: shop.local.salt
+  uptime:
+    compose_file: docker/compose.uptime.yml
+    description: Uptime Kuma
+    envs:
+      available:
+      - dev
+      - prod
+      default: dev
+    salt_states:
+    - docker.uptime
+    services:
+      uptime:
+        default_scale: 1
+        max_scale: 2
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: status.local.salt
+  umami:
+    compose_file: docker/compose.umami.yml
+    description: Umami Analytics
+    envs:
+      available:
+      - dev
+      - prod
+      - staging
+      default: dev
+    salt_states:
+    - docker.umami
+    services:
+      umami:
+        default_scale: 1
+        max_scale: 3
+        min_scale: 1
+    traefik:
+      entrypoint: websecure
+      host: umami.local.salt
+  worker:
+    compose_file: docker/compose.worker.yml
+    description: Async job runner consuming internal queues
+    envs:
+      available:
+      - dev
+      - staging
+      default: dev
+    salt_states:
+    - docker.worker
+    - monitoring.worker
+    services:
+      worker:
+        default_scale: 1
+        max_scale: 10
+        min_scale: 1

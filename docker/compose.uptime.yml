@@ -1,0 +1,13 @@
+version: '3.9'
+services:
+  uptime:
+    image: louislam/uptime-kuma:latest
+    env_file:
+      - config/env/uptime.env
+    ports:
+      - "3001:3001"
+    volumes:
+      - uptime_data:/app/data
+    restart: unless-stopped
+volumes:
+  uptime_data:

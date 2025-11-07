@@ -1,0 +1,36 @@
+version: '3.9'
+services:
+  saleor:
+    image: saleor/saleor:latest
+    env_file:
+      - config/env/saleor.env
+    depends_on:
+      - saleor-db
+      - saleor-redis
+    ports:
+      - "8000:8000"
+    volumes:
+      - saleor_media:/app/media
+    restart: unless-stopped
+  saleor-worker:
+    image: saleor/saleor:latest
+    command: celery -A saleor.celeryconf worker --loglevel=info
+    env_file:
+      - config/env/saleor.env
+    depends_on:
+      - saleor-db
+      - saleor-redis
+    restart: unless-stopped
+  saleor-db:
+    image: postgres:15
+    env_file:
+      - config/env/saleor.env
+    volumes:
+      - saleor_db:/var/lib/postgresql/data
+    restart: unless-stopped
+  saleor-redis:
+    image: redis:7
+    restart: unless-stopped
+volumes:
+  saleor_db:
+  saleor_media:

@@ -1,0 +1,14 @@
+version: '3.9'
+services:
+  payments:
+    image: ghcr.io/example/payments:v2
+    restart: unless-stopped
+    environment:
+      APP_ENV: dev
+    ports:
+    - 8080:8080
+    labels:
+    - traefik.enable=true
+    - traefik.http.routers.payments.rule=Host(`pay.local.salt`)
+    - traefik.http.routers.payments.entrypoints=websecure
+    - traefik.http.services.payments.loadbalancer.server.port=8080

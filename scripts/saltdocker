@@ -1,0 +1,1061 @@
+#!/usr/bin/env python3
+"""Unified helper for managing modular Docker/Compose stacks with Salt."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pwd
+import shlex
+import shutil
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+try:
+    import yaml  # type: ignore
+except ImportError as exc:  # pragma: no cover - dependency hint
+    sys.stderr.write(
+        "PyYAML is required: pip install pyyaml (import error: %s)\n" % exc
+    )
+    sys.exit(2)
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = ROOT / "config" / "projects.yml"
+PROJECT_TEMPLATE_DIR = ROOT / "templates" / "project"
+MENU_ENTRIES: List[Tuple[str, str, str]] = [
+    ("list", "List all catalogued projects", "saltdocker list"),
+    ("describe", "Inspect metadata for a project", "saltdocker describe api"),
+    (
+        "deploy",
+        "Run Salt states then docker compose up",
+        "saltdocker deploy payments --env staging",
+    ),
+    ("remove", "Compose down + optionally purge volumes", "saltdocker remove payments"),
+    ("scale", "Adjust replicas for a service", "saltdocker scale api --service api --replicas 3"),
+    ("status", "Show docker compose ps output", "saltdocker status api"),
+    ("logs", "Tail compose logs", "saltdocker logs api --follow"),
+    ("health", "Fail if any container unhealthy", "saltdocker health api"),
+    ("init", "Scaffold compose/state/docs for new service", "saltdocker init billing --image ghcr.io/org/billing:latest"),
+    ("validate", "Check compose/state/doc triplets", "saltdocker validate"),
+    ("prune", "Remove project from catalog + files", "saltdocker prune legacy"),
+    ("bump-image", "Update image in compose + Salt", "saltdocker bump-image api --image ghcr.io/api:v2"),
+    (
+        "bump-image-bulk",
+        "Update images for multiple projects",
+        "saltdocker bump-image-bulk --set api=img --set worker=img",
+    ),
+    (
+        "add-sudo-user",
+        "Create a local user in the sudo group",
+        "saltdocker add-sudo-user deployer",
+    ),
+    (
+        "install-cli",
+        "Symlink or copy saltdocker onto your PATH",
+        "saltdocker install-cli --destination /usr/local/bin/saltdocker",
+    ),
+    ("menu", "Show this curated cheat sheet", "saltdocker menu"),
+]
+
+
+class FriendlyFormatter(
+    argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter
+):
+    """Readable argparse formatter with preserved spacing and defaults."""
+
+
+def build_menu_table(entries: List[Tuple[str, str, str]] | None = None) -> str:
+    table = entries or MENU_ENTRIES
+    headers = ("Command", "Summary", "Example")
+    rows = [headers]
+    rows.extend(table)
+    widths = [0, 0, 0]
+    for cmd, summary, example in rows:
+        widths[0] = max(widths[0], len(cmd))
+        widths[1] = max(widths[1], len(summary))
+        widths[2] = max(widths[2], len(example))
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    lines = [fmt.format(*headers), fmt.format(*("-" * w for w in widths))]
+    for entry in table:
+        lines.append(fmt.format(*entry))
+    return "\n".join(lines)
+
+
+CLI_DESCRIPTION = textwrap.dedent(
+    """
+    Saltdocker Toolkit CLI
+    Manage Salt-backed Docker/Compose projects from a single catalog (config/projects.yml).
+
+    Common workflow:
+      1. ./scripts/saltdocker list
+      2. ./scripts/saltdocker deploy <project> --env staging
+      3. ./scripts/saltdocker logs <project> --follow
+    """
+).strip()
+
+CLI_EPILOG = textwrap.dedent(
+    f"""
+    Quick reference:
+    {build_menu_table()}
+
+    Need docs? See README.md, AGENTS.md, and docs/help/ for walkthroughs.
+    """
+)
+
+
+class SaltDockerError(Exception):
+    """Raised when a user-facing error occurs."""
+
+
+def load_projects(config_path: Path) -> Dict[str, dict]:
+    if not config_path.exists():
+        raise SaltDockerError(f"Config file not found: {config_path}")
+    with config_path.open("r", encoding="utf-8") as cfg:
+        data = yaml.safe_load(cfg)
+    projects = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(projects, dict):
+        raise SaltDockerError("projects.yml must define a 'projects' mapping")
+    return projects
+
+
+def save_projects(config_path: Path, projects: Dict[str, dict]) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as cfg:
+        yaml.safe_dump({"projects": projects}, cfg, sort_keys=True)
+
+
+def print_table(projects: Dict[str, dict]) -> None:
+    headers = ("Project", "Compose", "Salt States", "Default Env")
+    rows: List[List[str]] = []
+    for name, meta in sorted(projects.items()):
+        rows.append(
+            [
+                name,
+                meta.get("compose_file", "-"),
+                ", ".join(meta.get("salt_states", [])) or "-",
+                meta.get("envs", {}).get("default", "dev"),
+            ]
+        )
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(cell))
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*headers))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print(fmt.format(*row))
+
+
+def build_env(meta: dict, env: str | None) -> str:
+    envs = meta.get("envs", {})
+    default_env = envs.get("default")
+    available = envs.get("available", [])
+    selected = env or default_env or "dev"
+    if available and selected not in available:
+        raise SaltDockerError(
+            f"Environment '{selected}' not in declared environments: {available}"
+        )
+    return selected
+
+
+def ensure_dirs(paths: List[Path]) -> None:
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def render_template(template_name: str, destination: Path, replacements: Dict[str, str], force: bool) -> None:
+    template_path = PROJECT_TEMPLATE_DIR / template_name
+    if not template_path.exists():
+        raise SaltDockerError(f"Missing template: {template_path}")
+    if destination.exists() and not force:
+        raise SaltDockerError(
+            f"Destination {destination} exists. Use --force-files to overwrite."
+        )
+    content = template_path.read_text(encoding="utf-8")
+    for key, value in replacements.items():
+        content = content.replace(f"{{{{{key}}}}}", str(value))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(content, encoding="utf-8")
+
+
+def parse_key_value(items: List[str]) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise SaltDockerError(f"Invalid key=value pair: '{item}'")
+        key, value = item.split("=", 1)
+        parsed[key.strip()] = value.strip()
+    return parsed
+
+
+def build_env_map(values: List[str] | None) -> Dict[str, str]:
+    return parse_key_value(values or [])
+
+
+def compose_stack_args(base: str, overrides: List[str] | None) -> List[str]:
+    files = [base]
+    if overrides:
+        files.extend(overrides)
+    args: List[str] = []
+    for file in files:
+        args.extend(["-f", file])
+    return args
+
+
+def resolve_state_path(state_id: str) -> Path:
+    rel = state_id.replace(".", "/") + ".sls"
+    return ROOT / "salt" / "states" / rel
+
+
+def project_artifacts(project: str, meta: dict) -> Dict[str, Path]:
+    compose = meta.get("compose_file")
+    state_ids = meta.get("salt_states", [])
+    doc = ROOT / "docs" / "projects" / f"{project}.md"
+    artifacts: Dict[str, Path] = {}
+    if compose:
+        artifacts["compose"] = ROOT / compose
+    if state_ids:
+        # only track first state for deletion helpers
+        artifacts["state"] = resolve_state_path(state_ids[0])
+    artifacts["doc"] = doc
+    return artifacts
+
+
+def run_cmd(cmd: List[str], dry_run: bool) -> None:
+    run_cmd_env(cmd, dry_run, env=None)
+
+
+def run_cmd_env(cmd: List[str], dry_run: bool, env: Dict[str, str] | None) -> None:
+    printable = " ".join(shlex.quote(part) for part in cmd)
+    prefix = "[dry-run]" if dry_run else "[exec]"
+    print(f"{prefix} {printable}")
+    if dry_run:
+        return
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
+    proc = subprocess.run(cmd, check=False, env=merged_env)
+    if proc.returncode != 0:
+        raise SaltDockerError(f"Command failed: {printable}")
+
+
+def ensure_project(projects: Dict[str, dict], name: str) -> dict:
+    if name not in projects:
+        raise SaltDockerError(f"Unknown project '{name}'. Use 'saltdocker list'.")
+    return projects[name]
+
+
+def cmd_list(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    print_table(projects)
+
+
+def cmd_describe(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    print(json.dumps(meta, indent=2))
+
+
+def cmd_deploy(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    selected_env = build_env(meta, args.env)
+    salt_states = meta.get("salt_states", [])
+    compose_file = args.compose_file or meta.get("compose_file")
+    if not compose_file:
+        raise SaltDockerError("compose_file missing for project")
+    env_map = build_env_map(args.env_var)
+    pillar_extra = parse_key_value(args.pillar or [])
+    pillar_payload: Dict[str, Any] = {"env": selected_env}
+    pillar_payload.update(pillar_extra)
+    pillar_arg = f"pillar='{json.dumps(pillar_payload)}'"
+    for state in salt_states:
+        run_cmd(
+            [
+                "salt-call",
+                "--local",
+                "state.apply",
+                state,
+                pillar_arg,
+            ],
+            args.dry_run,
+        )
+    compose_args_list = compose_stack_args(compose_file, args.compose_override)
+    run_cmd_env(
+        [
+            "docker",
+            "compose",
+            *compose_args_list,
+            "up",
+            "-d",
+        ],
+        args.dry_run,
+        env=env_map,
+    )
+
+
+def cmd_remove(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    compose_file = args.compose_file or meta.get("compose_file")
+    if not compose_file:
+        raise SaltDockerError("compose_file missing for project")
+    env_map = build_env_map(args.env_var)
+    compose_args_list = compose_stack_args(compose_file, args.compose_override)
+    cmd = ["docker", "compose", *compose_args_list, "down", "--remove-orphans"]
+    if args.purge_volumes:
+        cmd.append("--volumes")
+    run_cmd_env(cmd, args.dry_run, env=env_map)
+
+
+def cmd_scale(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    services = meta.get("services", {})
+    if args.service not in services:
+        raise SaltDockerError(
+            f"Service '{args.service}' is not defined for project '{args.project}'"
+        )
+    constraints = services[args.service]
+    replicas = args.replicas
+    min_scale = constraints.get("min_scale")
+    max_scale = constraints.get("max_scale")
+    if min_scale and replicas < min_scale:
+        raise SaltDockerError(
+            f"Replica target {replicas} below min_scale {min_scale} for {args.service}"
+        )
+    if max_scale and replicas > max_scale:
+        raise SaltDockerError(
+            f"Replica target {replicas} above max_scale {max_scale} for {args.service}"
+        )
+    compose_file = args.compose_file or meta.get("compose_file")
+    if not compose_file:
+        raise SaltDockerError("compose_file missing for project")
+    env_map = build_env_map(args.env_var)
+    compose_args_list = compose_stack_args(compose_file, args.compose_override)
+    run_cmd_env(
+        [
+            "docker",
+            "compose",
+            *compose_args_list,
+            "up",
+            "-d",
+            "--scale",
+            f"{args.service}={replicas}",
+        ],
+        args.dry_run,
+        env=env_map,
+    )
+
+
+def cmd_status(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    compose_file = args.compose_file or meta.get("compose_file")
+    if not compose_file:
+        raise SaltDockerError("compose_file missing for project")
+    env_map = build_env_map(args.env_var)
+    compose_args_list = compose_stack_args(compose_file, args.compose_override)
+    run_cmd_env(
+        [
+            "docker",
+            "compose",
+            *compose_args_list,
+            "ps",
+        ],
+        args.dry_run,
+        env=env_map,
+    )
+
+
+def cmd_logs(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    compose_file = args.compose_file or meta.get("compose_file")
+    if not compose_file:
+        raise SaltDockerError("compose_file missing for project")
+    env_map = build_env_map(args.env_var)
+    compose_args_list = compose_stack_args(compose_file, args.compose_override)
+    cmd = ["docker", "compose", *compose_args_list, "logs"]
+    if args.follow:
+        cmd.append("--follow")
+    if args.tail is not None:
+        cmd.extend(["--tail", str(args.tail)])
+    if args.service:
+        cmd.append(args.service)
+    run_cmd_env(cmd, args.dry_run, env=env_map)
+
+
+def cmd_health(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    compose_file = args.compose_file or meta.get("compose_file")
+    if not compose_file:
+        raise SaltDockerError("compose_file missing for project")
+    env_map = build_env_map(args.env_var)
+    compose_args_list = compose_stack_args(compose_file, args.compose_override)
+    cmd = ["docker", "compose", *compose_args_list, "ps", "--format", "json"]
+    printable = " ".join(shlex.quote(part) for part in cmd)
+    if args.dry_run:
+        print(f"[dry-run] {printable}")
+        return
+    merged_env = os.environ.copy()
+    merged_env.update(env_map)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=merged_env)
+    if proc.returncode != 0:
+        raise SaltDockerError(f"Command failed: {printable}: {proc.stderr.strip()}")
+    try:
+        containers = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise SaltDockerError(f"Unable to parse docker compose output: {exc}") from exc
+    unhealthy = []
+    for container in containers:
+        state = container.get("State")
+        health = container.get("Health")
+        name = container.get("Service") or container.get("Name")
+        if state != "running" or (health and health != "healthy"):
+            unhealthy.append((name, state, health))
+    if unhealthy:
+        print("Health check failed:")
+        for name, state, health in unhealthy:
+            print(f" - {name}: state={state} health={health}")
+        raise SaltDockerError("one or more containers unhealthy")
+    print("All containers are running and healthy.")
+
+
+def cmd_init(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    project = args.project
+    if project in projects and not args.force_config:
+        raise SaltDockerError(
+            f"Project '{project}' already exists. Use --force-config to overwrite."
+        )
+
+    default_env = args.default_env
+    envs = list(args.env or [])
+    if default_env not in envs:
+        envs.insert(0, default_env)
+    envs = sorted(set(envs))
+
+    compose_rel = args.compose_file or f"docker/compose.{project}.yml"
+    salt_state = args.salt_state or f"docker.{project}"
+    service_name = args.service_name or project
+
+    replacements = {
+        "project": project,
+        "description": args.description,
+        "image": args.image,
+        "default_env": default_env,
+        "service_name": service_name,
+        "port": str(args.port),
+        "traefik_host": args.traefik_host or f"{project}.local.salt",
+        "traefik_entrypoint": args.traefik_entrypoint,
+        "compose_file": compose_rel,
+        "salt_state": salt_state,
+        "state_name": salt_state,
+        "default_scale": str(args.default_scale),
+    }
+
+    ensure_dirs(
+        [
+            ROOT / "docker",
+            ROOT / "salt" / "states" / "docker",
+            ROOT / "docs" / "projects",
+        ]
+    )
+
+    render_template(
+        "compose.yml.tpl",
+        ROOT / compose_rel,
+        replacements,
+        args.force_files,
+    )
+    render_template(
+        "salt_state.sls.tpl",
+        ROOT / "salt" / "states" / "docker" / f"{project}.sls",
+        replacements,
+        args.force_files,
+    )
+    render_template(
+        "doc.md.tpl",
+        ROOT / "docs" / "projects" / f"{project}.md",
+        replacements,
+        True,
+    )
+
+    new_entry = {
+        "description": args.description,
+        "compose_file": compose_rel,
+        "salt_states": [salt_state],
+        "envs": {"default": default_env, "available": envs},
+        "services": {
+            service_name: {
+                "default_scale": args.default_scale,
+                "min_scale": args.min_scale,
+                "max_scale": args.max_scale,
+            }
+        },
+    }
+    if args.traefik_host:
+        new_entry["traefik"] = {
+            "host": args.traefik_host,
+            "entrypoint": args.traefik_entrypoint,
+        }
+
+    projects[project] = new_entry
+    save_projects(Path(args.config), dict(sorted(projects.items())))
+    print(f"Project '{project}' added to {args.config}")
+
+
+def cmd_validate(_: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    issues: List[str] = []
+    for name, meta in sorted(projects.items()):
+        artifacts = project_artifacts(name, meta)
+        compose = artifacts.get("compose")
+        if compose and not compose.exists():
+            issues.append(f"[{name}] missing compose file: {compose}")
+        for state_id in meta.get("salt_states", []):
+            state_path = resolve_state_path(state_id)
+            if not state_path.exists():
+                issues.append(f"[{name}] missing salt state: {state_path}")
+        doc = artifacts.get("doc")
+        if doc and not doc.exists():
+            issues.append(f"[{name}] missing docs entry: {doc}")
+    if issues:
+        print("Validation failed:")
+        for item in issues:
+            print(f" - {item}")
+        raise SaltDockerError("see issues above")
+    print("All projects passed validation.")
+
+
+def cmd_prune(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, args.project)
+    artifacts = project_artifacts(args.project, meta)
+    del projects[args.project]
+    save_projects(Path(args.config), dict(sorted(projects.items())))
+    print(f"Removed '{args.project}' from {args.config}")
+    if args.keep_files:
+        return
+    for label, path in artifacts.items():
+        if path.exists():
+            print(f"[cleanup] removing {label}: {path}")
+            path.unlink()
+
+
+def cmd_bump_image(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    bump_image_for_project(args.project, args.image, projects)
+
+
+def bump_image_for_project(project: str, image: str, projects: Dict[str, dict]) -> None:
+    meta = ensure_project(projects, project)
+    artifacts = project_artifacts(project, meta)
+    compose = artifacts.get("compose")
+    state_ids = meta.get("salt_states", [])
+    if compose and compose.exists():
+        compose_data = yaml.safe_load(compose.read_text(encoding="utf-8")) or {}
+        services = compose_data.get("services", {})
+        for service in services.values():
+            if isinstance(service, dict) and "image" in service:
+                service["image"] = image
+        compose.write_text(yaml.safe_dump(compose_data, sort_keys=False), encoding="utf-8")
+        print(f"Updated compose image in {compose}")
+    for state_id in state_ids:
+        state_path = resolve_state_path(state_id)
+        if not state_path.exists():
+            continue
+        state_data = yaml.safe_load(state_path.read_text(encoding="utf-8")) or {}
+        if state_id in state_data:
+            resources = state_data[state_id]
+            if isinstance(resources, dict):
+                for _, block in resources.items():
+                    if isinstance(block, list):
+                        for item in block:
+                            if isinstance(item, dict) and "image" in item:
+                                item["image"] = image
+        state_path.write_text(yaml.safe_dump(state_data, sort_keys=False), encoding="utf-8")
+        print(f"Updated Salt state image in {state_path}")
+
+
+def cmd_bump_bulk(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    assignments = parse_key_value(args.set)
+    for project, image in assignments.items():
+        bump_image_for_project(project, image, projects)
+
+
+def ensure_root_privileges() -> None:
+    if os.geteuid() != 0:
+        raise SaltDockerError("This command must be run as root (try sudo).")
+
+
+def run_checked(cmd: List[str], input_text: str | None = None) -> None:
+    printable = " ".join(shlex.quote(part) for part in cmd)
+    proc = subprocess.run(cmd, capture_output=True, text=True, input=input_text)
+    if proc.returncode != 0:
+        raise SaltDockerError(
+            f"Command failed: {printable}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+        )
+
+
+def cmd_add_sudo_user(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    _ = projects
+    ensure_root_privileges()
+    username = args.username
+    home = Path(args.home or f"/home/{username}")
+    shell = args.shell
+    sudo_group = args.sudo_group
+
+    try:
+        user_info = pwd.getpwnam(username)
+        user_exists = True
+    except KeyError:
+        user_info = None
+        user_exists = False
+
+    if user_exists and not args.force:
+        raise SaltDockerError(
+            f"User '{username}' already exists. Use --force to reset password or add keys."
+        )
+
+    if not user_exists:
+        run_checked(
+            [
+                "useradd",
+                "-m",
+                "-d",
+                str(home),
+                "-s",
+                shell,
+                username,
+            ]
+        )
+        user_info = pwd.getpwnam(username)
+        if args.home is None:
+            home = Path(user_info.pw_dir)
+    else:
+        print(f"User '{username}' already present, updating password/keys/groups.")
+        if args.home is None:
+            home = Path(user_info.pw_dir)
+
+    run_checked(["usermod", "-aG", sudo_group, username])
+
+    if args.password:
+        run_checked(["chpasswd"], input_text=f"{username}:{args.password}")
+
+    if args.ssh_key:
+        key_path = Path(args.ssh_key).expanduser()
+        if not key_path.exists():
+            raise SaltDockerError(f"SSH key file not found: {key_path}")
+        key_material = key_path.read_text(encoding="utf-8").strip()
+        if not key_material:
+            raise SaltDockerError("SSH key file is empty")
+        ssh_dir = home / ".ssh"
+        ssh_dir.mkdir(parents=True, exist_ok=True)
+        authorized = ssh_dir / "authorized_keys"
+        add_newline = authorized.exists() and authorized.stat().st_size > 0
+        with authorized.open("a", encoding="utf-8") as auth:
+            if add_newline:
+                auth.write("\n")
+            auth.write(key_material + "\n")
+        uid = user_info.pw_uid if user_info else os.getuid()
+        gid = user_info.pw_gid if user_info else os.getgid()
+        os.chown(ssh_dir, uid, gid)
+        os.chmod(ssh_dir, 0o700)
+        os.chown(authorized, uid, gid)
+        os.chmod(authorized, 0o600)
+
+    print(
+        f"User '{username}' ensured with sudo access via group '{sudo_group}'."
+        " Update ssh config or passwords as needed."
+    )
+
+
+def cmd_install_cli(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    _ = projects
+    destination = Path(args.destination).expanduser()
+    source = Path(__file__).resolve()
+    if destination.exists() or destination.is_symlink():
+        if not args.force:
+            raise SaltDockerError(
+                f"Destination {destination} already exists. Use --force to overwrite."
+            )
+        if destination.is_symlink() or destination.is_file():
+            destination.unlink()
+        else:
+            raise SaltDockerError(
+                f"Destination {destination} exists and is not a file/symlink; refusing to remove."
+            )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if args.copy:
+        shutil.copy2(source, destination)
+    else:
+        destination.symlink_to(source)
+    destination.chmod(destination.stat().st_mode | 0o111)
+    mode = "copied" if args.copy else "symlinked"
+    print(f"CLI {mode} to {destination}. Add its parent dir to PATH to invoke 'saltdocker'.")
+
+
+def cmd_menu(_: argparse.Namespace, projects: Dict[str, dict]) -> None:
+    title = "Saltdocker Quick Menu"
+    print(title)
+    print("-" * len(title))
+    print(build_menu_table())
+    print(
+        "\nTip: run ./scripts/saltdocker <command> from the repo root or add scripts/ to PATH."
+    )
+    if projects:
+        print("\nProjects registered:")
+        for name in sorted(projects.keys()):
+            print(f"  - {name}")
+
+
+COMMANDS = {
+    "list": cmd_list,
+    "describe": cmd_describe,
+    "deploy": cmd_deploy,
+    "remove": cmd_remove,
+    "scale": cmd_scale,
+    "status": cmd_status,
+    "logs": cmd_logs,
+    "health": cmd_health,
+    "init": cmd_init,
+    "validate": cmd_validate,
+    "prune": cmd_prune,
+    "bump-image": cmd_bump_image,
+    "bump-image-bulk": cmd_bump_bulk,
+    "add-sudo-user": cmd_add_sudo_user,
+    "install-cli": cmd_install_cli,
+    "menu": cmd_menu,
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="saltdocker",
+        description=CLI_DESCRIPTION,
+        formatter_class=FriendlyFormatter,
+        epilog=CLI_EPILOG,
+    )
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        help="Path to projects.yml (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print commands without executing",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("list", help="List all projects")
+
+    describe = subparsers.add_parser("describe", help="Show project metadata")
+    describe.add_argument("project", help="Project id to describe")
+
+    deploy = subparsers.add_parser("deploy", help="Run Salt states then compose up")
+    deploy.add_argument("project", help="Project id to deploy")
+    deploy.add_argument("--env", help="Environment name (dev/staging/prod)")
+    deploy.add_argument(
+        "--compose-file",
+        help="Override compose file path",
+    )
+    deploy.add_argument(
+        "--compose-override",
+        action="append",
+        dest="compose_override",
+        help="Additional docker compose override file (repeatable)",
+    )
+    deploy.add_argument(
+        "--pillar",
+        action="append",
+        help="Extra pillar key=value passed to salt-call",
+    )
+    deploy.add_argument(
+        "--env-var",
+        action="append",
+        dest="env_var",
+        help="Environment variable key=value for docker compose",
+    )
+
+    remove = subparsers.add_parser("remove", help="Compose down a project")
+    remove.add_argument("project", help="Project id to remove")
+    remove.add_argument(
+        "--compose-file",
+        help="Override compose file path",
+    )
+    remove.add_argument(
+        "--compose-override",
+        action="append",
+        dest="compose_override",
+        help="Additional docker compose override file (repeatable)",
+    )
+    remove.add_argument(
+        "--purge-volumes",
+        action="store_true",
+        help="Also delete named volumes",
+    )
+    remove.add_argument(
+        "--env-var",
+        action="append",
+        dest="env_var",
+        help="Environment variable key=value for docker compose",
+    )
+
+    scale = subparsers.add_parser("scale", help="Scale a service via compose")
+    scale.add_argument("project", help="Project id to adjust")
+    scale.add_argument("--service", required=True, help="Service name inside compose")
+    scale.add_argument("--replicas", type=int, required=True, help="Replica target")
+    scale.add_argument(
+        "--compose-file",
+        help="Override compose file path",
+    )
+    scale.add_argument(
+        "--compose-override",
+        action="append",
+        dest="compose_override",
+        help="Additional docker compose override file (repeatable)",
+    )
+    scale.add_argument(
+        "--env-var",
+        action="append",
+        dest="env_var",
+        help="Environment variable key=value for docker compose",
+    )
+
+    status = subparsers.add_parser("status", help="Show docker compose ps output")
+    status.add_argument("project", help="Project id to inspect")
+    status.add_argument(
+        "--compose-file",
+        help="Override compose file path",
+    )
+    status.add_argument(
+        "--compose-override",
+        action="append",
+        dest="compose_override",
+        help="Additional docker compose override file (repeatable)",
+    )
+    status.add_argument(
+        "--env-var",
+        action="append",
+        dest="env_var",
+        help="Environment variable key=value for docker compose",
+    )
+
+    logs = subparsers.add_parser("logs", help="Tail docker compose logs")
+    logs.add_argument("project", help="Project id")
+    logs.add_argument(
+        "--compose-file",
+        help="Override compose file path",
+    )
+    logs.add_argument(
+        "--compose-override",
+        action="append",
+        dest="compose_override",
+        help="Additional docker compose override file (repeatable)",
+    )
+    logs.add_argument("--service", help="Optional service name")
+    logs.add_argument("--tail", type=int, help="Number of lines to tail")
+    logs.add_argument(
+        "--follow",
+        action="store_true",
+        help="Stream logs",
+    )
+    logs.add_argument(
+        "--env-var",
+        action="append",
+        dest="env_var",
+        help="Environment variable key=value for docker compose",
+    )
+
+    health = subparsers.add_parser("health", help="Validate containers are healthy")
+    health.add_argument("project", help="Project id")
+    health.add_argument(
+        "--compose-file",
+        help="Override compose file path",
+    )
+    health.add_argument(
+        "--compose-override",
+        action="append",
+        dest="compose_override",
+        help="Additional docker compose override file (repeatable)",
+    )
+    health.add_argument(
+        "--env-var",
+        action="append",
+        dest="env_var",
+        help="Environment variable key=value for docker compose",
+    )
+
+    init_cmd = subparsers.add_parser("init", help="Scaffold a new project entry")
+    init_cmd.add_argument("project", help="Project slug (e.g. payments)")
+    init_cmd.add_argument(
+        "--description",
+        default="New service",
+        help="Project description",
+    )
+    init_cmd.add_argument(
+        "--image",
+        default="ghcr.io/example/service:latest",
+        help="Default container image",
+    )
+    init_cmd.add_argument(
+        "--service-name",
+        help="Primary compose service name",
+    )
+    init_cmd.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Container/service port",
+    )
+    init_cmd.add_argument(
+        "--default-env",
+        default="dev",
+        help="Default environment",
+    )
+    init_cmd.add_argument(
+        "--env",
+        action="append",
+        dest="env",
+        help="Additional environments (repeatable)",
+    )
+    init_cmd.add_argument(
+        "--compose-file",
+        help="Override compose file path",
+    )
+    init_cmd.add_argument(
+        "--salt-state",
+        help="Override Salt state id",
+    )
+    init_cmd.add_argument(
+        "--default-scale",
+        type=int,
+        default=1,
+        help="Default replica target",
+    )
+    init_cmd.add_argument(
+        "--min-scale",
+        type=int,
+        default=1,
+        help="Minimum replicas",
+    )
+    init_cmd.add_argument(
+        "--max-scale",
+        type=int,
+        default=3,
+        help="Maximum replicas",
+    )
+    init_cmd.add_argument(
+        "--traefik-host",
+        help="Optional Traefik host rule",
+    )
+    init_cmd.add_argument(
+        "--traefik-entrypoint",
+        default="websecure",
+        help="Traefik entrypoint",
+    )
+    init_cmd.add_argument(
+        "--force-files",
+        action="store_true",
+        help="Overwrite compose/state/doc files",
+    )
+    init_cmd.add_argument(
+        "--force-config",
+        action="store_true",
+        help="Overwrite existing config entry",
+    )
+
+    validate = subparsers.add_parser("validate", help="Verify compose/state/doc files exist")
+
+    prune = subparsers.add_parser("prune", help="Remove a project entry")
+    prune.add_argument("project", help="Project id to remove")
+    prune.add_argument(
+        "--keep-files",
+        action="store_true",
+        help="Keep compose/state/doc files on disk",
+    )
+
+    bump = subparsers.add_parser("bump-image", help="Update image in compose + states")
+    bump.add_argument("project", help="Project id")
+    bump.add_argument("--image", required=True, help="New image reference")
+
+    bump_bulk = subparsers.add_parser(
+        "bump-image-bulk", help="Update multiple projects' images"
+    )
+    bump_bulk.add_argument(
+        "--set",
+        action="append",
+        required=True,
+        help="Mapping of project=image (repeat for multiple projects)",
+    )
+
+    add_user = subparsers.add_parser(
+        "add-sudo-user",
+        help="Create a local user with sudo privileges",
+    )
+    add_user.add_argument("username", help="Username to create or update")
+    add_user.add_argument(
+        "--password",
+        help="Optional plaintext password (omit to skip)",
+    )
+    add_user.add_argument(
+        "--ssh-key",
+        help="Path to a public SSH key to append to authorized_keys",
+    )
+    add_user.add_argument(
+        "--home",
+        help="Override home directory (defaults to /home/<username>)",
+    )
+    add_user.add_argument(
+        "--shell",
+        default="/bin/bash",
+        help="Login shell",
+    )
+    add_user.add_argument(
+        "--sudo-group",
+        default="sudo",
+        help="Group that grants sudo rights",
+    )
+    add_user.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow reconfiguration if the user already exists",
+    )
+
+    install_cli = subparsers.add_parser(
+        "install-cli",
+        help="Symlink or copy the saltdocker script onto your PATH",
+    )
+    install_cli.add_argument(
+        "--destination",
+        default="/usr/local/bin/saltdocker",
+        help="Install target path",
+    )
+    install_cli.add_argument(
+        "--copy",
+        action="store_true",
+        help="Copy instead of symlink",
+    )
+    install_cli.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite if destination exists",
+    )
+
+    subparsers.add_parser("menu", help="Show the curated menu")
+
+    return parser
+
+
+def main(argv: List[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    config_path = Path(args.config)
+    try:
+        projects = load_projects(config_path)
+        handler = COMMANDS[args.command]
+        handler(args, projects)
+    except SaltDockerError as err:
+        parser.error(str(err))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

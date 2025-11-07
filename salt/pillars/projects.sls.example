@@ -1,0 +1,31 @@
+saltdocker:
+  root: /root/saltdocker
+
+services:
+  mattermost:
+    db_password: change-me
+    minio_access_key: local-minio
+    minio_secret_key: local-minio-secret
+    site_url: https://mm.local.salt
+  mastodon:
+    db_password: change-me
+    redis_password: change-me
+    secrets:
+      secret_key_base: change-me
+      otp_secret: change-me
+  saleor:
+    secret_key: change-me
+    database_url: postgres://saleor:change-me@saleor-db:5432/saleor
+    redis_url: redis://saleor-redis:6379/0
+  medusajs:
+    database_url: postgres://medusa:change-me@medusajs-db:5432/medusa
+    redis_url: redis://medusajs-redis:6379/0
+    jwt_secret: change-me
+  discourse:
+    admin_email: admin@example.com
+    admin_password: change-me
+    db_password: change-me
+  traefik:
+    tls:
+      cert: /etc/traefik/certs/dev.crt
+      key: /etc/traefik/certs/dev.key

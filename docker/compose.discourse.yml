@@ -1,0 +1,27 @@
+version: '3.9'
+services:
+  discourse:
+    image: bitnami/discourse:latest
+    env_file:
+      - config/env/discourse.env
+    depends_on:
+      - discourse-db
+      - discourse-redis
+    ports:
+      - "8081:8080"
+    volumes:
+      - discourse_data:/bitnami
+    restart: unless-stopped
+  discourse-db:
+    image: postgres:15
+    env_file:
+      - config/env/discourse.env
+    volumes:
+      - discourse_db:/var/lib/postgresql/data
+    restart: unless-stopped
+  discourse-redis:
+    image: redis:7
+    restart: unless-stopped
+volumes:
+  discourse_data:
+  discourse_db:

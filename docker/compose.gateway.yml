@@ -1,0 +1,24 @@
+version: '3.9'
+services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.docker=true"
+      - "--providers.file.watch=true"
+      - "--certificatesresolvers.le.acme.tlschallenge=true"
+      - "--certificatesresolvers.le.acme.email=admin@example.com"
+      - "--certificatesresolvers.le.acme.storage=/etc/traefik/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./../traefik/dynamic:/etc/traefik/dynamic"
+      - "./../traefik/certs:/etc/traefik/certs"
+      - "./../traefik/acme:/etc/traefik"
+  observability:
+    image: ghcr.io/example/observability:latest
+    restart: unless-stopped

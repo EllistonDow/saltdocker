@@ -1,0 +1,14 @@
+version: '3.9'
+services:
+  api:
+    image: ghcr.io/example/api:latest
+    restart: unless-stopped
+    environment:
+      APP_ENV: dev
+    ports:
+      - "9000:9000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`api.local.salt`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.services.api.loadbalancer.server.port=9000"

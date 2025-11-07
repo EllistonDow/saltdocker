@@ -1,0 +1,33 @@
+version: '3.9'
+services:
+  medusajs:
+    image: medusajs/medusa:latest
+    env_file:
+      - config/env/medusajs.env
+    depends_on:
+      - medusajs-db
+      - medusajs-redis
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+  medusajs-worker:
+    image: medusajs/medusa:latest
+    command: node ./dist/commands/run-worker.js
+    env_file:
+      - config/env/medusajs.env
+    depends_on:
+      - medusajs-db
+      - medusajs-redis
+    restart: unless-stopped
+  medusajs-db:
+    image: postgres:15
+    env_file:
+      - config/env/medusajs.env
+    volumes:
+      - medusajs_db:/var/lib/postgresql/data
+    restart: unless-stopped
+  medusajs-redis:
+    image: redis:7
+    restart: unless-stopped
+volumes:
+  medusajs_db:
