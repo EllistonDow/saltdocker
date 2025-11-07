@@ -1,9 +1,9 @@
-version: '3.9'
 services:
   uptime:
     image: louislam/uptime-kuma:latest
+    container_name: uptime
     env_file:
-      - config/env/uptime.env
+      - ../config/env/uptime.env
     ports:
       - "3001:3001"
     volumes:

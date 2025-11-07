@@ -10,12 +10,14 @@ Opinionated helper scripts and docs for running modular Docker/Docker Compose pr
 5. Tail logs or check status with `./scripts/saltdocker logs api --follow` and `./scripts/saltdocker status api`.
 6. Run `./scripts/saltdocker health api` after deployments to ensure containers are healthy.
 7. Audit metadata anytime via `./scripts/saltdocker validate` (or `./scripts/saltdocker menu` for a cheat sheet).
+8. 完成需求后执行 `./scripts/check.sh`，自动跑 lint/validate/compose config，确保代码随时可合并。
+9. 需要提交+推送时用 `./scripts/git-release.sh "feat: xxx"`：它会调用 `scripts/check.sh`、`git add -A`、根据 commit message 推断 tag bump（`feat` → 次版本、`breaking!` → 主版本、其他 → 补丁）并 `git push`。可用 `BUMP=minor ./scripts/git-release.sh` 强制级别，或用 `DRY_RUN=1` 仅预览。
 
 ## CLI Usage
 - Local invocation: `./scripts/saltdocker <command>` works anywhere because the script uses absolute paths under `/root/saltdocker`.
 - Install globally: `./scripts/saltdocker install-cli --destination /usr/local/bin/saltdocker` (or add `scripts/` to your `PATH`). Use `--copy` if symlinks are restricted and `--force` to overwrite an existing binary.
 - Menu/help: `./scripts/saltdocker --help` now prints a quick-reference table; `./scripts/saltdocker menu` renders the same table plus the registered project list.
-- Provision sudo users: `./scripts/saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub --force` (must run as root; skips creation unless `--force` when the user exists).
+- Provision sudo users: `./scripts/saltdocker add-sudo-user deployer --ssh-key ~/.ssh/id_rsa.pub --force` (must run as root; add `--passwordless-sudo` to drop a `/etc/sudoers.d/` entry, `--sudoers-dir` to override the drop-in path).
 - Manage fleet installs via Salt: include the `tooling.saltdocker_cli` state and set pillar `saltdocker:root: /opt/saltdocker` (or whichever clone path) to keep `/usr/local/bin/saltdocker` pointing at the repo automatically.
 - Need completions or shell aliases? Add `alias saltdocker=./scripts/saltdocker` to your shell profile or export `PATH=$PATH:/root/saltdocker/scripts`.
 

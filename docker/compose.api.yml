@@ -1,7 +1,6 @@
-version: '3.9'
 services:
   api:
-    image: ghcr.io/example/api:latest
+    image: ghcr.io/saltdocker/api:latest
     restart: unless-stopped
     environment:
       APP_ENV: dev

@@ -1,6 +1,6 @@
 docker.worker:
   docker_container.running:
-    - image: ghcr.io/example/worker:latest
+    - image: ghcr.io/saltdocker/worker:latest
     - restart_policy: unless-stopped
     - environment:
         APP_ENV: {{ pillar.get('env', 'dev') }}

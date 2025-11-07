@@ -1,0 +1,5 @@
+.saltdocker/
+scripts/__pycache__/
+__pycache__/
+traefik/acme/
+.venv/

@@ -4,4 +4,4 @@ traefik.api:
     - source: salt://traefik/dynamic/api.yml
     - user: root
     - group: root
-    - mode: 640
+    - mode: "0640"

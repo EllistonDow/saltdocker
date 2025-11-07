@@ -15,11 +15,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install pyyaml yamllint
-      - run: scripts/saltdocker list
-      - run: scripts/saltdocker validate
-      - run: scripts/saltdocker health gateway --dry-run
-      - run: yamllint config/projects.yml
+      - run: pip install -r requirements-dev.txt
+      - run: scripts/check.sh
 ```
 
-Add additional jobs for integration tests or Salt dry-runs as the repo matures. Gate merges on a green pipeline plus reviewer approval.
+Add additional jobs for integration tests, Salt `state.apply --test` dry-runs, or Compose smoke tests as the repo matures. Gate merges on a green pipeline plus reviewer approval.

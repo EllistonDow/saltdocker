@@ -1,16 +1,17 @@
+---
 projects:
   api:
     compose_file: docker/compose.api.yml
     description: Public REST gateway with Traefik exposure
     envs:
       available:
-      - dev
-      - staging
-      - prod
+        - dev
+        - staging
+        - prod
       default: dev
     salt_states:
-    - docker.api
-    - traefik.api
+      - docker.api
+      - traefik.api
     services:
       api:
         default_scale: 2
@@ -20,18 +21,18 @@ projects:
       entrypoint: websecure
       host: api.local.salt
       middlewares:
-      - compress@
+        - compress@
   discourse:
     compose_file: docker/compose.discourse.yml
     description: Discourse Community
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.discourse
+      - docker.discourse
     services:
       discourse:
         default_scale: 1
@@ -45,11 +46,11 @@ projects:
     description: Docusaurus Docs
     envs:
       available:
-      - dev
-      - prod
+        - dev
+        - prod
       default: dev
     salt_states:
-    - docker.docusaurus
+      - docker.docusaurus
     services:
       docusaurus:
         default_scale: 1
@@ -63,12 +64,13 @@ projects:
     description: Edge Traefik + support services
     envs:
       available:
-      - staging
-      - prod
+        - staging
+        - prod
       default: prod
     salt_states:
-    - traefik.gateway
-    - observability.gateway
+      - traefik.gateway
+    networks:
+      - saltdocker_proxy
     services:
       traefik:
         default_scale: 1
@@ -79,12 +81,12 @@ projects:
     description: Mastodon Social
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.mastodon
+      - docker.mastodon
     services:
       mastodon:
         default_scale: 1
@@ -98,12 +100,12 @@ projects:
     description: Mattermost Team Edition
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.mattermost
+      - docker.mattermost
     services:
       mattermost:
         default_scale: 1
@@ -117,12 +119,12 @@ projects:
     description: MedusaJS Commerce
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.medusajs
+      - docker.medusajs
     services:
       medusajs:
         default_scale: 1
@@ -136,12 +138,12 @@ projects:
     description: Payments API
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.payments
+      - docker.payments
     services:
       payments:
         default_scale: 2
@@ -155,12 +157,12 @@ projects:
     description: Plausible Analytics
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.plausible
+      - docker.plausible
     services:
       plausible:
         default_scale: 1
@@ -174,12 +176,12 @@ projects:
     description: Saleor Commerce
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.saleor
+      - docker.saleor
     services:
       saleor:
         default_scale: 2
@@ -190,14 +192,37 @@ projects:
       host: shop.local.salt
   uptime:
     compose_file: docker/compose.uptime.yml
+    compose_enabled: false
+    env_file: config/env/uptime.env
     description: Uptime Kuma
     envs:
       available:
-      - dev
-      - prod
+        - dev
+        - prod
       default: dev
     salt_states:
-    - docker.uptime
+      - docker.uptime
+    networks:
+      - saltdocker_proxy
+    requires:
+      - gateway
+    pillar_env_map:
+      - env: UPTIME_PUBLIC_HOST
+        path: services:uptime:host
+      - env: UPTIME_KUMA_HOST
+        path: services:uptime:bind_host
+      - env: UPTIME_KUMA_PORT
+        path: services:uptime:port
+        type: int
+      - env: TZ
+        path: services:uptime:tz
+      - env: UPTIME_NETWORK
+        path: services:uptime:network
+      - env: UPTIME_ENTRYPOINT
+        path: services:uptime:entrypoint
+      - env: UPTIME_TLS
+        path: services:uptime:tls
+        type: bool
     services:
       uptime:
         default_scale: 1
@@ -206,17 +231,20 @@ projects:
     traefik:
       entrypoint: websecure
       host: status.local.salt
+    health:
+      containers:
+        - uptime
   umami:
     compose_file: docker/compose.umami.yml
     description: Umami Analytics
     envs:
       available:
-      - dev
-      - prod
-      - staging
+        - dev
+        - prod
+        - staging
       default: dev
     salt_states:
-    - docker.umami
+      - docker.umami
     services:
       umami:
         default_scale: 1
@@ -230,12 +258,12 @@ projects:
     description: Async job runner consuming internal queues
     envs:
       available:
-      - dev
-      - staging
+        - dev
+        - staging
       default: dev
     salt_states:
-    - docker.worker
-    - monitoring.worker
+      - docker.worker
+      - monitoring.worker
     services:
       worker:
         default_scale: 1

@@ -3,4 +3,5 @@ traefik.gateway:
     - name: /etc/traefik/dynamic
     - user: root
     - group: root
-    - mode: 755
+    - mode: "0755"
+    - makedirs: True

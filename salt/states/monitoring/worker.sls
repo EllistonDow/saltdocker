@@ -1,8 +1,12 @@
 monitoring.worker:
-  file.managed:
+  file.serialize:
     - name: /etc/prometheus/targets/worker.json
-    - contents: |
-        [{"targets": ["worker:9100"], "labels": {"job": "worker"}}]
-    - mode: 640
+    - serializer: json
+    - dataset:
+        - targets:
+            - worker:9100
+          labels:
+            job: worker
+    - mode: "0640"
     - user: root
     - group: root

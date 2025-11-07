@@ -1,4 +1,3 @@
-version: '3.9'
 services:
   mastodon-web:
     image: ghcr.io/mastodon/mastodon:latest

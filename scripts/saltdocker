@@ -26,6 +26,153 @@ except ImportError as exc:  # pragma: no cover - dependency hint
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config" / "projects.yml"
 PROJECT_TEMPLATE_DIR = ROOT / "templates" / "project"
+SALT_FILE_ROOT = ROOT / "salt" / "states"
+SALT_PILLAR_ROOT = ROOT / "salt" / "pillars"
+SALT_RUNTIME_DIR = ROOT / ".saltdocker"
+SALT_CACHE_DIR = SALT_RUNTIME_DIR / "salt-cache"
+SALT_LOG_DIR = SALT_RUNTIME_DIR / "logs"
+SALT_LOG_FILE = SALT_LOG_DIR / "salt-call.log"
+
+
+def ensure_salt_runtime_dirs() -> None:
+    for path in (SALT_CACHE_DIR, SALT_LOG_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def compose_is_enabled(meta: dict) -> bool:
+    return meta.get("compose_enabled", True)
+
+
+def require_compose(meta: dict, project: str) -> None:
+    if not compose_is_enabled(meta):
+        raise SaltDockerError(
+            f"Project '{project}' disables docker compose commands (compose_enabled=false)."
+        )
+
+
+def get_project_networks(meta: dict) -> List[str]:
+    networks = meta.get("networks", [])
+    result: List[str] = []
+    for net in networks:
+        if isinstance(net, str):
+            result.append(net)
+        elif isinstance(net, dict):
+            name = net.get("name")
+            if not name:
+                continue
+            result.append(name)
+        else:
+            continue
+    return result
+
+
+def ensure_docker_networks(meta: dict, dry_run: bool) -> None:
+    for network in get_project_networks(meta):
+        if dry_run:
+            print(f"[dry-run] ensure docker network {network}")
+            continue
+        inspect = subprocess.run(
+            ["docker", "network", "inspect", network],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if inspect.returncode == 0:
+            continue
+        printable = " ".join(shlex.quote(part) for part in ["docker", "network", "create", network])
+        print(f"[exec] {printable}")
+        create = subprocess.run(
+            ["docker", "network", "create", network],
+            check=False,
+        )
+        if create.returncode != 0:
+            raise SaltDockerError(f"Failed to create docker network '{network}' (exit {create.returncode})")
+
+
+def parse_env_file(path: Path) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            val = val.strip()
+            if (val.startswith('"') and val.endswith('"')) or (
+                val.startswith("'") and val.endswith("'")
+            ):
+                val = val[1:-1]
+            values[key] = val
+    return values
+
+
+def load_project_env(meta: dict) -> Dict[str, str]:
+    env_files = meta.get("env_file")
+    if not env_files:
+        return {}
+    if isinstance(env_files, str):
+        env_files = [env_files]
+    values: Dict[str, str] = {}
+    for rel in env_files:
+        env_path = ROOT / rel
+        if not env_path.exists():
+            raise SaltDockerError(f"env_file not found: {env_path}")
+        values.update(parse_env_file(env_path))
+    return values
+
+
+def cast_env_value(value: str, type_name: str | None) -> Any:
+    if not type_name or type_name == "str":
+        return value
+    if type_name == "int":
+        return int(value)
+    if type_name == "bool":
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return value
+
+
+def set_nested_value(target: Dict[str, Any], path: List[str], value: Any) -> None:
+    current = target
+    for key in path[:-1]:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    current[path[-1]] = value
+
+
+def apply_pillar_env_map(
+    pillar_payload: Dict[str, Any],
+    meta: dict,
+    env_values: Dict[str, str],
+) -> None:
+    mappings = meta.get("pillar_env_map", [])
+    for mapping in mappings:
+        if isinstance(mapping, str):
+            env_var = mapping
+            path = mapping
+            type_name = None
+        elif isinstance(mapping, dict):
+            env_var = mapping.get("env") or mapping.get("var")
+            path = mapping.get("path") or mapping.get("target")
+            type_name = mapping.get("type")
+        else:
+            continue
+        if not env_var or not path:
+            continue
+        if env_var not in env_values:
+            continue
+        try:
+            value = cast_env_value(env_values[env_var], type_name)
+        except ValueError as exc:
+            raise SaltDockerError(
+                f"Failed to cast env var {env_var} ('{env_values[env_var]}') as {type_name}: {exc}"
+            ) from exc
+        set_nested_value(pillar_payload, path.split(":"), value)
 MENU_ENTRIES: List[Tuple[str, str, str]] = [
     ("list", "List all catalogued projects", "saltdocker list"),
     ("describe", "Inspect metadata for a project", "saltdocker describe api"),
@@ -198,9 +345,13 @@ def build_env_map(values: List[str] | None) -> Dict[str, str]:
 
 
 def compose_stack_args(base: str, overrides: List[str] | None) -> List[str]:
-    files = [base]
+    def to_abs(path: str) -> str:
+        p = Path(path)
+        return str(p if p.is_absolute() else (ROOT / p))
+
+    files = [to_abs(base)]
     if overrides:
-        files.extend(overrides)
+        files.extend(to_abs(item) for item in overrides)
     args: List[str] = []
     for file in files:
         args.extend(["-f", file])
@@ -260,47 +411,106 @@ def cmd_describe(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
 
 
 def cmd_deploy(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
-    meta = ensure_project(projects, args.project)
+    completed: set[str] = set()
+    _deploy_with_dependencies(args.project, args, projects, completed, [])
+
+
+def _deploy_with_dependencies(
+    name: str,
+    args: argparse.Namespace,
+    projects: Dict[str, dict],
+    completed: set[str],
+    stack: List[str],
+    use_cli_overrides: bool = True,
+) -> None:
+    if name in completed:
+        return
+    if name in stack:
+        raise SaltDockerError(
+            f"Cyclic dependency detected: {' -> '.join(stack + [name])}"
+        )
+    meta = ensure_project(projects, name)
+    stack.append(name)
+    for dep in meta.get("requires", []):
+        print(f"[info] Ensuring dependency '{dep}' for project '{name}'")
+        _deploy_with_dependencies(dep, args, projects, completed, stack, False)
+    stack.pop()
+    _deploy_single_project(name, meta, args, use_cli_overrides)
+    completed.add(name)
+
+
+def _deploy_single_project(
+    project_name: str,
+    meta: dict,
+    args: argparse.Namespace,
+    use_cli_overrides: bool,
+) -> None:
     selected_env = build_env(meta, args.env)
     salt_states = meta.get("salt_states", [])
-    compose_file = args.compose_file or meta.get("compose_file")
-    if not compose_file:
+    compose_file = (
+        args.compose_file if use_cli_overrides and args.compose_file else meta.get("compose_file")
+    )
+    compose_enabled = compose_is_enabled(meta)
+    if compose_enabled and not compose_file:
         raise SaltDockerError("compose_file missing for project")
-    env_map = build_env_map(args.env_var)
-    pillar_extra = parse_key_value(args.pillar or [])
+    env_map = build_env_map(args.env_var) if use_cli_overrides else {}
+    env_file_values = load_project_env(meta)
+    pillar_extra = parse_key_value(args.pillar or []) if use_cli_overrides else {}
     pillar_payload: Dict[str, Any] = {"env": selected_env}
     pillar_payload.update(pillar_extra)
-    pillar_arg = f"pillar='{json.dumps(pillar_payload)}'"
+    apply_pillar_env_map(pillar_payload, meta, env_file_values)
+    pillar_arg = f"pillar={json.dumps(pillar_payload)}"
+    ensure_salt_runtime_dirs()
     for state in salt_states:
         run_cmd(
             [
                 "salt-call",
                 "--local",
+                "--file-root",
+                str(SALT_FILE_ROOT),
+                "--pillar-root",
+                str(SALT_PILLAR_ROOT),
+                "--cachedir",
+                str(SALT_CACHE_DIR),
+                "--log-file",
+                str(SALT_LOG_FILE),
                 "state.apply",
                 state,
                 pillar_arg,
             ],
             args.dry_run,
         )
-    compose_args_list = compose_stack_args(compose_file, args.compose_override)
-    run_cmd_env(
-        [
-            "docker",
-            "compose",
-            *compose_args_list,
-            "up",
-            "-d",
-        ],
-        args.dry_run,
-        env=env_map,
-    )
+    if compose_enabled and compose_file:
+        ensure_docker_networks(meta, args.dry_run)
+        compose_args_list = compose_stack_args(
+            compose_file,
+            args.compose_override if use_cli_overrides else None,
+        )
+        env_payload = {**env_file_values, **env_map} if env_file_values else env_map
+        run_cmd_env(
+            [
+                "docker",
+                "compose",
+                *compose_args_list,
+                "up",
+                "-d",
+            ],
+            args.dry_run,
+            env=env_payload,
+        )
+    else:
+        print(
+            f"[info] Skipping docker compose up for {project_name} (compose_enabled=false)"
+        )
 
 
 def cmd_remove(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
     meta = ensure_project(projects, args.project)
+    require_compose(meta, args.project)
     compose_file = args.compose_file or meta.get("compose_file")
     if not compose_file:
         raise SaltDockerError("compose_file missing for project")
+    ensure_docker_networks(meta, args.dry_run)
     env_map = build_env_map(args.env_var)
     compose_args_list = compose_stack_args(compose_file, args.compose_override)
     cmd = ["docker", "compose", *compose_args_list, "down", "--remove-orphans"]
@@ -311,6 +521,8 @@ def cmd_remove(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
 
 def cmd_scale(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
     meta = ensure_project(projects, args.project)
+    require_compose(meta, args.project)
+    ensure_docker_networks(meta, args.dry_run)
     services = meta.get("services", {})
     if args.service not in services:
         raise SaltDockerError(
@@ -350,6 +562,8 @@ def cmd_scale(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
 
 def cmd_status(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
     meta = ensure_project(projects, args.project)
+    require_compose(meta, args.project)
+    ensure_docker_networks(meta, args.dry_run)
     compose_file = args.compose_file or meta.get("compose_file")
     if not compose_file:
         raise SaltDockerError("compose_file missing for project")
@@ -369,6 +583,8 @@ def cmd_status(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
 
 def cmd_logs(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
     meta = ensure_project(projects, args.project)
+    require_compose(meta, args.project)
+    ensure_docker_networks(meta, args.dry_run)
     compose_file = args.compose_file or meta.get("compose_file")
     if not compose_file:
         raise SaltDockerError("compose_file missing for project")
@@ -386,31 +602,61 @@ def cmd_logs(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
 
 def cmd_health(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
     meta = ensure_project(projects, args.project)
-    compose_file = args.compose_file or meta.get("compose_file")
-    if not compose_file:
-        raise SaltDockerError("compose_file missing for project")
-    env_map = build_env_map(args.env_var)
-    compose_args_list = compose_stack_args(compose_file, args.compose_override)
-    cmd = ["docker", "compose", *compose_args_list, "ps", "--format", "json"]
-    printable = " ".join(shlex.quote(part) for part in cmd)
-    if args.dry_run:
-        print(f"[dry-run] {printable}")
-        return
-    merged_env = os.environ.copy()
-    merged_env.update(env_map)
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=merged_env)
-    if proc.returncode != 0:
-        raise SaltDockerError(f"Command failed: {printable}: {proc.stderr.strip()}")
-    try:
-        containers = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise SaltDockerError(f"Unable to parse docker compose output: {exc}") from exc
+    if compose_is_enabled(meta):
+        ensure_docker_networks(meta, args.dry_run)
+        compose_file = args.compose_file or meta.get("compose_file")
+        if not compose_file:
+            raise SaltDockerError("compose_file missing for project")
+        env_map = build_env_map(args.env_var)
+        compose_args_list = compose_stack_args(compose_file, args.compose_override)
+        cmd = ["docker", "compose", *compose_args_list, "ps", "--format", "json"]
+        printable = " ".join(shlex.quote(part) for part in cmd)
+        if args.dry_run:
+            print(f"[dry-run] {printable}")
+            return
+        merged_env = os.environ.copy()
+        merged_env.update(env_map)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=merged_env)
+        if proc.returncode != 0:
+            raise SaltDockerError(f"Command failed: {printable}: {proc.stderr.strip()}")
+        try:
+            containers = json.loads(proc.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise SaltDockerError(f"Unable to parse docker compose output: {exc}") from exc
+        _assert_containers_healthy(containers)
+    else:
+        container_names = (
+            meta.get("health", {}).get("containers")
+            or meta.get("health_containers")
+            or [meta.get("health", {}).get("container")]  # backward compat
+        )
+        container_names = [c for c in container_names if c]
+        if not container_names:
+            container_names = [meta.get("health", {}).get("fallback") or args.project]
+        if args.dry_run:
+            for name in container_names:
+                print(f"[dry-run] docker inspect --format '{{{{json .State}}}}' {name}")
+            return
+        containers = []
+        for name in container_names:
+            cmd = ["docker", "inspect", "--format", "{{json .State}}", name]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise SaltDockerError(
+                    f"Failed to inspect container '{name}': {proc.stderr.strip()}"
+                )
+            state = json.loads(proc.stdout)
+            containers.append({"Name": name, "State": "running" if state.get("Running") else state.get("Status"), "Health": state.get("Health", {}).get("Status")})
+        _assert_containers_healthy(containers)
+
+
+def _assert_containers_healthy(containers: List[Dict[str, Any]]) -> None:
     unhealthy = []
     for container in containers:
         state = container.get("State")
         health = container.get("Health")
         name = container.get("Service") or container.get("Name")
-        if state != "running" or (health and health != "healthy"):
+        if state != "running" or (health and health not in ("healthy", None)):
             unhealthy.append((name, state, health))
     if unhealthy:
         print("Health check failed:")
@@ -593,6 +839,25 @@ def run_checked(cmd: List[str], input_text: str | None = None) -> None:
         )
 
 
+def ensure_passwordless_sudo(username: str, directory: Path, force: bool) -> None:
+    dropin_dir = directory
+    entry = f"{username} ALL=(ALL) NOPASSWD:ALL\n"
+    dropin_dir.mkdir(parents=True, exist_ok=True)
+    dropin_path = dropin_dir / f"saltdocker-{username}"
+    if dropin_path.exists():
+        existing = dropin_path.read_text(encoding="ascii").strip()
+        if existing == entry.strip():
+            return
+        if not force:
+            raise SaltDockerError(
+                f"Sudoers drop-in {dropin_path} exists. Use --force to overwrite."
+            )
+    dropin_path.write_text(entry, encoding="ascii")
+    os.chown(dropin_path, 0, 0)
+    os.chmod(dropin_path, 0o440)
+    run_checked(["visudo", "-cf", str(dropin_path)])
+
+
 def cmd_add_sudo_user(args: argparse.Namespace, projects: Dict[str, dict]) -> None:
     _ = projects
     ensure_root_privileges()
@@ -634,6 +899,9 @@ def cmd_add_sudo_user(args: argparse.Namespace, projects: Dict[str, dict]) -> No
             home = Path(user_info.pw_dir)
 
     run_checked(["usermod", "-aG", sudo_group, username])
+
+    if args.passwordless_sudo:
+        ensure_passwordless_sudo(username, Path(args.sudoers_dir), args.force)
 
     if args.password:
         run_checked(["chpasswd"], input_text=f"{username}:{args.password}")
@@ -892,7 +1160,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_cmd.add_argument(
         "--image",
-        default="ghcr.io/example/service:latest",
+        default="ghcr.io/saltdocker/service:latest",
         help="Default container image",
     )
     init_cmd.add_argument(
@@ -1017,6 +1285,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Allow reconfiguration if the user already exists",
+    )
+    add_user.add_argument(
+        "--passwordless-sudo",
+        action="store_true",
+        help="Create/update a sudoers drop-in for passwordless sudo",
+    )
+    add_user.add_argument(
+        "--sudoers-dir",
+        default="/etc/sudoers.d",
+        help="Directory for sudoers drop-in files",
     )
 
     install_cli = subparsers.add_parser(

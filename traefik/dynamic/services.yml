@@ -37,7 +37,7 @@ http:
       tls:
         certResolver: le
     status:
-      rule: Host(`status.local.salt`)
+      rule: Host(`status.saltdocker.tschenfeng.com`)
       service: uptime
       entryPoints: [websecure]
       tls:

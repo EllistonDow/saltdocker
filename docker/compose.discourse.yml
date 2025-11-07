@@ -1,4 +1,3 @@
-version: '3.9'
 services:
   discourse:
     image: bitnami/discourse:latest

@@ -1,15 +1,18 @@
-version: '3.9'
 services:
   traefik:
     image: traefik:v3.0
+    env_file:
+      - config/env/gateway.env
     command:
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
       - "--providers.file.directory=/etc/traefik/dynamic"
       - "--providers.docker=true"
       - "--providers.file.watch=true"
       - "--certificatesresolvers.le.acme.tlschallenge=true"
-      - "--certificatesresolvers.le.acme.email=admin@example.com"
+      - "--certificatesresolvers.le.acme.email=${TRAEFIK_ACME_EMAIL:-ssl@tschenfeng.com}"
       - "--certificatesresolvers.le.acme.storage=/etc/traefik/acme.json"
     ports:
       - "80:80"
@@ -19,6 +22,8 @@ services:
       - "./../traefik/dynamic:/etc/traefik/dynamic"
       - "./../traefik/certs:/etc/traefik/certs"
       - "./../traefik/acme:/etc/traefik"
-  observability:
-    image: ghcr.io/example/observability:latest
-    restart: unless-stopped
+    networks:
+      - saltdocker_proxy
+networks:
+  saltdocker_proxy:
+    external: true
